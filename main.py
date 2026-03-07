@@ -54,7 +54,6 @@ def before(req, sess):
 
 bware = Beforeware(before, skip=[r'/favicon\.ico', '/login', '/send_login', '/stimulus', '/about', '/'])
 app,rt = fast_app(before=bware, session_cookie='cobalt_sess', secret_key=secrets.token_hex(32), hdrs=Theme.blue.headers(katex=True) + [audio_js])
-if 'srv' not in globals(): srv = JupyUvi(app=app)
 def mk_state(): return dict(reversals=[], trial=0, gap_ms=100, results=[], correct_streak=0, last_direction=None)
 def get_state(session):
     if 'state' not in session: session['state'] = mk_state()
@@ -241,3 +240,4 @@ def data(req, session):
         mk_slicers(),
         Div(id='chart', hx_get=data_chart, hx_trigger='load')))
 _pages = {about.to(): about, data.to(): data, test.to(): test, demographics.to(): demographics}
+serve()
