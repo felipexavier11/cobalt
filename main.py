@@ -162,7 +162,7 @@ def send_login(req, username:str, password:str, next:str, session):
 @rt
 def logout(req, session):
     session.clear()
-    return Container(render_md(Path('about.md').read_text())), mk_nav(hx_swap_oob='true')
+    return Container(render_md(Path('README.md').read_text())), mk_nav(hx_swap_oob='true')
 @rt
 def about(req, session): return htmx(req, Container(render_md(Path('README.md').read_text())))
 @rt('/')
