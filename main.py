@@ -7,53 +7,14 @@ from fastlite import *
 from monsterui.all import *
 
 matplotlib.use('Agg')
+login_redir = Redirect('/login')
 
-audio_js = Script("""
-let audioCtx = null;
-let audioBuffer = null;
-const otherEar = ear => ear === "left" ? "right" : "left";
-
-async function loadStimulus() {
-    if (audioBuffer) return;
-    audioCtx ??= new AudioContext();
-    const response = await fetch('/stimulus');
-    const arrayBuffer = await response.arrayBuffer();
-    audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-}
-
-function playInEar(ear, startTime) {
-    const source = audioCtx.createBufferSource();
-    const panner = audioCtx.createStereoPanner();
-    source.buffer = audioBuffer;
-    panner.pan.value = ear === "left" ? -1 : 1;
-    source.connect(panner).connect(audioCtx.destination);
-    source.start(startTime);
-}
-
-function playBeep(startTime, duration, freq=440, volume=0.5) {
-    const osc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
-    osc.frequency.value = freq;
-    gain.gain.value = volume;
-    osc.connect(gain).connect(audioCtx.destination);
-    osc.start(startTime);
-    osc.stop(startTime + duration);
-}
-
-async function playTOJ(firstEar, gapMs, beepDuration=0.5) {
-    await loadStimulus();
-    const now = audioCtx.currentTime;
-    playBeep(now, beepDuration);
-    playInEar(firstEar, now + beepDuration + 1);
-    playInEar(otherEar(firstEar), now + beepDuration + 1 + audioBuffer.duration + (gapMs / 1000));
-}
-""")
 def before(req, sess):
     auth = req.scope['auth'] = sess.get('auth', None)
-    if not auth: return RedirectResponse(login.to(next=req.url.path), status_code=303)
+    if not auth: return login_redir
 
-bware = Beforeware(before, skip=[r'/favicon\.ico', '/login', '/send_login', '/stimulus', '/about', '/'])
-app,rt = fast_app(before=bware, session_cookie='cobalt_sess', secret_key=secrets.token_hex(32), hdrs=Theme.blue.headers(katex=True) + [audio_js])
+bware = Beforeware(before, skip=[r'/favicon\.ico', '/login', '/'])
+app,rt = fast_app(before=bware, session_cookie='cobalt_sess', secret_key=secrets.token_hex(32), hdrs=Theme.blue.headers(katex=True))
 def mk_state(): return dict(reversals=[], trial=0, gap_ms=100, results=[], correct_streak=0, last_direction=None)
 def get_state(session):
     if 'state' not in session: session['state'] = mk_state()
@@ -63,36 +24,55 @@ def favicon(): return FileResponse('favicon.ico')
 @rt
 def stimulus(): return FileResponse('stimulus.wav')
 RESEARCHER_USER,RESEARCHER_PASS = os.getenv('RESEARCHER_USER'),os.getenv('RESEARCHER_PASS')
-def mk_nav(auth=None, **kw):
-    common = [A(H4('About'), hx_get=about, hx_target='#main', hx_push_url='true', cls=ButtonT.ghost)]
-    authed = [A(H4('Test'),   hx_get=demographics, hx_target='#main', hx_push_url='true', cls=ButtonT.ghost),
-              A(H4('Data'),   hx_get=data,          hx_target='#main', hx_push_url='true', cls=ButtonT.ghost),
-              A(H4('Logout'), hx_post=logout,        hx_target='#main', hx_push_url='/', cls=ButtonT.ghost)]
-    anon   = [A(H4('Login'),  hx_get=login,          hx_target='#main', hx_push_url='true', cls=ButtonT.ghost)]
-    return NavBar(*common, *(authed if auth else anon),
-                  brand=A(H3('COBALT'), hx_get=about, hx_target='#main', hx_push_url='true', href='/'),
-                  id='navbar', cls='bg-primary text-primary-content py-4 px-16', **kw)
-def mk_shell(content): return Title('COBALT'), mk_nav(), Main(content, id='main')
-def htmx(req, content): return content if req.headers.get('HX-Request') else mk_shell(content)
+def mk_nav(auth=None):
+    authed = [A('Test', href=test),
+              A('Data', href=data),
+              A('Logout', href=logout)]
+    anon   = [A('Login',  href='/login')]
+    return NavBar(*(authed if auth else anon),
+                  brand=A(H3('COBALT'), href=index),
+                  id='navbar', cls='bg-primary text-primary-content py-4 px-16')
+def mk_shell(sess, content): return Title('COBALT'), mk_nav(sess.get('auth', None)), Main(content, id='main')
+@rt('/login')
+def get(sess):
+    if sess.get('auth'): return Redirect('/')
+    return mk_shell(sess, Div(Card(
+        H3('Researcher Login'),
+        P(id='errormsg', cls='text-red-500'),
+        Form(LabelInput('Username', id='username', name='username', autocomplete='username'),
+             LabelInput('Password', id='password', name='password', type='password', autocomplete='current-password'),
+             Button('Log in', cls=ButtonT.primary),
+             hx_post='/login', hx_target='#errormsg'), cls='w-96'), cls='flex justify-center pt-4'))
+
+@rt('/login')
+def post(req, sess, username:str, password:str):
+    if username==RESEARCHER_USER and password==RESEARCHER_PASS: sess['auth'] = True
+    if not sess.get('auth'): return 'Wrong username or password.'
+    return Redirect('/')
+
+@rt
+def logout(req, sess):
+    sess.clear()
+    return Redirect('/')
 @rt
 def test(req, session):
-    if not session.get('patient'): return RedirectResponse(demographics.to())
+    if not session.get('patient'): return Redirect(demographics.to())
     state = get_state(session)
     if len(state['reversals']) >= 6:
         threshold = sum(state['reversals'][-4:]) / 4
-        return htmx(req, Div(Card(
+        return Div(Card(
             H2('Test Complete!'),
             P(f'Trials: {state["trial"]}'),
             P(f'Reversals: {len(state["reversals"])}'),
             P(f'Your TOJ Threshold: {threshold:.0f} ms', cls='text-xl font-bold'),
             Button('Start Over', hx_get=demographics, hx_target='#main', cls=ButtonT.primary), 
             cls='w-128'
-        ), cls='min-h-screen flex items-center justify-center'))
+        ), cls='min-h-screen flex items-center justify-center')
 
     side = random.choice(['left', 'right'])
     gap = state['gap_ms']
 
-    return htmx(req, Div(Card(
+    return Div(Card(
         H2('Click Ordering Binaural Adaptive Lateralization Test (COBALT)'),
         P(f'Trial {state["trial"] + 1} — Gap: {state["gap_ms"]:.1f} ms — Reversals: {len(state["reversals"])}/6'),
         P('Put on headphones. Click Play, then indicate which ear heard the sound first.'),
@@ -104,7 +84,7 @@ def test(req, session):
         ),
         Div(id='result', cls='mt-4'),
         cls='w-128'
-    ), cls='min-h-screen flex items-center justify-center'))
+    ), cls='min-h-screen flex items-center justify-center')
 @rt
 def respond(req, session, answer: str, correct: str):
     state = get_state(session)
@@ -133,46 +113,22 @@ def respond(req, session, answer: str, correct: str):
     if new_direction: state['last_direction'] = new_direction
 
     icon = "✓" if is_correct else "✗"
-    return htmx(req, Div(
+    return Div(
         P(f"{icon} {'Correct!' if is_correct else 'Incorrect'} (was {correct})"),
-        Button("Next Trial", hx_get=test, hx_target='#main', cls=ButtonT.primary),
-    ))
+        Button("Next Trial", href=test, cls=ButtonT.primary),
+    )
 @rt
 def reset(session):
     session['state'] = mk_state()
-    return RedirectResponse(demographics)
+    return Redirect(test)
 @rt
-def login(req, next:str='/'):
-    return htmx(req, Div(Card(
-        H3('Researcher Login'),
-        Form(LabelInput('Username', id='username', name='username'),
-             LabelInput('Password', id='password', name='password', type='password'),
-             Hidden(name='next', value=next),
-             Button('Log in', cls=ButtonT.primary),
-             hx_post=send_login, hx_target='#main'),
-        cls='w-96'
-    ), cls='min-h-screen flex items-center justify-center'))
-
-@rt
-def send_login(req, username:str, password:str, next:str, session):
-    if username==RESEARCHER_USER and password==RESEARCHER_PASS: session['auth'] = True
-    if not session.get('auth'): return login(req, next=next)
-    return _pages.get(next, about)(req, session), mk_nav(True, hx_swap_oob='true')
-
-@rt
-def logout(req, session):
-    session.clear()
-    return Container(render_md(Path('README.md').read_text())), mk_nav(hx_swap_oob='true')
-@rt
-def about(req, session): return htmx(req, Container(render_md(Path('README.md').read_text())))
-@rt('/')
-def index(): return RedirectResponse(about)
+def index(sess): return mk_shell(sess, Container(render_md(Path('README.md').read_text())))
 db = database('cobalt.db')
 class Trial: id:int; initials:str; birthday:str; sex:str; test_date:str; trial:int; gap_ms:float; answer:str; correct:str
 trials = db.create(Trial, pk='id', transform=True)
 @rt
 def demographics(req, session):
-    return htmx(req, Div(Card(
+    return Div(Card(
         H3('Patient Information'),
         Form(LabelInput('Initials', id='initials', name='initials'),
              LabelInput('Birthday', id='birthday', name='birthday', type='date'),
@@ -181,7 +137,7 @@ def demographics(req, session):
              Button('Start Test', cls=ButtonT.primary, cls2='mt-4'),
              hx_post=save_demographics, hx_target='#main'),
         cls='w-96'
-    ), cls='min-h-screen flex items-center justify-center'))
+    ), cls='min-h-screen flex items-center justify-center')
 
 @rt
 def save_demographics(req, session, initials:str, birthday:str, sex:str):
@@ -239,5 +195,4 @@ def data(req, session):
         H3('Trial Data'),
         mk_slicers(),
         Div(id='chart', hx_get=data_chart, hx_trigger='load')))
-_pages = {about.to(): about, data.to(): data, test.to(): test, demographics.to(): demographics}
 serve()
