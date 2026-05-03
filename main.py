@@ -2,7 +2,6 @@ import base64,csv,io,os,random,secrets
 from datetime import date
 import matplotlib,matplotlib.pyplot as plt
 from fasthtml.common import *
-from fasthtml.jupyter import *
 from fastlite import *
 from monsterui.all import *
 
@@ -10,29 +9,28 @@ matplotlib.use('Agg')
 login_redir = Redirect('/login')
 
 def before(req, sess):
+    if os.getenv('DEV'): sess['auth'] = True
     auth = req.scope['auth'] = sess.get('auth', None)
     if not auth: return login_redir
 
 bware = Beforeware(before, skip=[r'/favicon\.ico', '/login', '/'])
 app,rt = fast_app(before=bware, session_cookie='cobalt_sess', secret_key=secrets.token_hex(32), hdrs=Theme.blue.headers(katex=True))
-def mk_state(): return dict(reversals=[], trial=0, gap_ms=100, results=[], correct_streak=0, last_direction=None)
-def get_state(session):
-    if 'state' not in session: session['state'] = mk_state()
-    return session['state']
 @rt('/favicon.ico')
 def favicon(): return FileResponse('favicon.ico')
 @rt
 def stimulus(): return FileResponse('stimulus.wav')
 RESEARCHER_USER,RESEARCHER_PASS = os.getenv('RESEARCHER_USER'),os.getenv('RESEARCHER_PASS')
 def mk_nav(auth=None):
-    authed = [A('Test', href=test),
+    authed = [A('Test', href='/test'),
               A('Data', href=data),
-              A('Logout', href=logout)]
+              A('Logout', href='/logout')]
     anon   = [A('Login',  href='/login')]
     return NavBar(*(authed if auth else anon),
                   brand=A(H3('COBALT'), href=index),
                   id='navbar', cls='bg-primary text-primary-content py-4 px-16')
-def mk_shell(sess, content): return Title('COBALT'), mk_nav(sess.get('auth', None)), Main(content, id='main')
+def mk_shell(sess, *content): return Title('COBALT'), mk_nav(sess.get('auth', None)), Main(*content, id='main')
+@rt
+def index(sess): return mk_shell(sess, Container(render_md(Path('README.md').read_text())))
 @rt('/login')
 def get(sess):
     if sess.get('auth'): return Redirect('/')
@@ -54,47 +52,37 @@ def post(req, sess, username:str, password:str):
 def logout(req, sess):
     sess.clear()
     return Redirect('/')
-@rt
-def test(req, session):
-    if not session.get('patient'): return Redirect(demographics.to())
-    state = get_state(session)
-    if len(state['reversals']) >= 6:
-        threshold = sum(state['reversals'][-4:]) / 4
-        return Div(Card(
-            H2('Test Complete!'),
-            P(f'Trials: {state["trial"]}'),
-            P(f'Reversals: {len(state["reversals"])}'),
-            P(f'Your TOJ Threshold: {threshold:.0f} ms', cls='text-xl font-bold'),
-            Button('Start Over', hx_get=demographics, hx_target='#main', cls=ButtonT.primary), 
-            cls='w-128'
-        ), cls='min-h-screen flex items-center justify-center')
+db = database('cobalt.db')
+class Trial: id:int; initials:str; birthday:str; sex:str; test_date:str; trial:int; gap_ms:float; answer:str; correct:str
+trials = db.create(Trial, pk='id', transform=True)
+@rt('/test')
+def get(req, sess):
+    if not sess.get('patient'):
+        return mk_shell(sess, Div(Card(
+            H3('Patient Information'),
+            Form(LabelInput('Initials', id='initials', name='initials'),
+                LabelInput('Birthday', id='birthday', name='birthday', type='date'),
+                Label('Sex'),
+                Select(Option('Male', value='M'), Option('Female', value='F'), Option('Other', value='O'), name='sex'),
+                Button('Start Test', cls=ButtonT.primary, cls2='mt-4'),
+                hx_post='/test', hx_target='body'), cls='w-96'), cls='pt-4 flex items-center justify-center'))
 
-    side = random.choice(['left', 'right'])
-    gap = state['gap_ms']
+    state = get_state(sess)
+    return test_page(sess)
 
-    return Div(Card(
-        H2('Click Ordering Binaural Adaptive Lateralization Test (COBALT)'),
-        P(f'Trial {state["trial"] + 1} — Gap: {state["gap_ms"]:.1f} ms — Reversals: {len(state["reversals"])}/6'),
-        P('Put on headphones. Click Play, then indicate which ear heard the sound first.'),
-        DivFullySpaced(Button('Play Sound', onclick=f'playTOJ("{side}", {gap})', cls=ButtonT.primary)),
-        Div(
-            Button('Left', hx_post=respond.to(answer='left', correct=side), hx_target='#result', cls=ButtonT.secondary),
-            Button('Right', hx_post=respond.to(answer='right', correct=side), hx_target='#result', cls=ButtonT.secondary),
-            cls='flex gap-4 justify-center mt-4'
-        ),
-        Div(id='result', cls='mt-4'),
-        cls='w-128'
-    ), cls='min-h-screen flex items-center justify-center')
-@rt
-def respond(req, session, answer: str, correct: str):
-    state = get_state(session)
-    patient = session.get('patient', {})
+@rt('/test')
+def post(req, sess, initials:str, birthday:str, sex:str):
+    sess['patient'] = dict(initials=initials, birthday=birthday, sex=sex)
+    sess['state'] = mk_state()
+    return Redirect('/test')
+@rt('/respond')
+def post(req, sess, answer: str, correct: str):
+    state = get_state(sess)
+    patient = sess.get('patient', {})
     is_correct = answer == correct
     state['trial'] += 1
     state['results'].append(is_correct)
-    trials.insert(Trial(initials=patient.get('initials'), birthday=patient.get('birthday'),
-        sex=patient.get('sex'), test_date=str(date.today()), trial=state['trial'],
-        gap_ms=state['gap_ms'], answer=answer, correct=correct))
+    trials.insert(Trial(initials=patient.get('initials'), birthday=patient.get('birthday'), sex=patient.get('sex'), test_date=str(date.today()), trial=state['trial'], gap_ms=state['gap_ms'], answer=answer, correct=correct))
 
     new_direction = None
     step = 0.8
@@ -111,39 +99,8 @@ def respond(req, session, answer: str, correct: str):
 
     if new_direction and state['last_direction'] and new_direction != state['last_direction']: state['reversals'].append(state['gap_ms'])
     if new_direction: state['last_direction'] = new_direction
-
-    icon = "✓" if is_correct else "✗"
-    return Div(
-        P(f"{icon} {'Correct!' if is_correct else 'Incorrect'} (was {correct})"),
-        Button("Next Trial", href=test, cls=ButtonT.primary),
-    )
-@rt
-def reset(session):
-    session['state'] = mk_state()
-    return Redirect(test)
-@rt
-def index(sess): return mk_shell(sess, Container(render_md(Path('README.md').read_text())))
-db = database('cobalt.db')
-class Trial: id:int; initials:str; birthday:str; sex:str; test_date:str; trial:int; gap_ms:float; answer:str; correct:str
-trials = db.create(Trial, pk='id', transform=True)
-@rt
-def demographics(req, session):
-    return Div(Card(
-        H3('Patient Information'),
-        Form(LabelInput('Initials', id='initials', name='initials'),
-             LabelInput('Birthday', id='birthday', name='birthday', type='date'),
-             Label('Sex'),
-             Select(Option('Male', value='M'), Option('Female', value='F'), Option('Other', value='O'), name='sex'),
-             Button('Start Test', cls=ButtonT.primary, cls2='mt-4'),
-             hx_post=save_demographics, hx_target='#main'),
-        cls='w-96'
-    ), cls='min-h-screen flex items-center justify-center')
-
-@rt
-def save_demographics(req, session, initials:str, birthday:str, sex:str):
-    session['patient'] = dict(initials=initials, birthday=birthday, sex=sex)
-    session['state'] = mk_state()
-    return test(req, session)
+    sess['state'] = state
+    return Redirect('/test')
 def patient_thresholds(sex=None, date_from=None, date_to=None):
     q = "SELECT initials,birthday,sex,test_date,gap_ms FROM trial t1 WHERE trial=(SELECT MAX(trial) FROM trial t2 WHERE t2.initials=t1.initials AND t2.test_date=t1.test_date)"
     conds,params = [],[]

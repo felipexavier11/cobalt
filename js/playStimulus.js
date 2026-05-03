@@ -35,4 +35,4 @@ async function playTOJ(firstEar, gapMs, beepDuration=0.5) {
     playBeep(now, beepDuration);
     playInEar(firstEar, now + beepDuration + 1);
     playInEar(otherEar(firstEar), now + beepDuration + 1 + audioBuffer.duration + (gapMs / 1000));
-
+}
