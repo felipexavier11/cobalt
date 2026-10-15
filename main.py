@@ -1,155 +1,288 @@
-import base64,csv,io,os,random,secrets
+import os,random,secrets
 from datetime import date
-import matplotlib,matplotlib.pyplot as plt
 from fasthtml.common import *
 from fastlite import *
 from monsterui.all import *
 
-matplotlib.use('Agg')
-login_redir = Redirect('/login')
+def set_scope_before(req, sess):
+    req.scope.setdefault('auth', sess.get('auth'))
 
-def before(req, sess):
-    if os.getenv('DEV'): sess['auth'] = True
-    auth = req.scope['auth'] = sess.get('auth', None)
-    if not auth: return login_redir
-
-bware = Beforeware(before, skip=[r'/favicon\.ico', '/login', '/'])
-app,rt = fast_app(before=bware, session_cookie='cobalt_sess', secret_key=secrets.token_hex(32), hdrs=Theme.blue.headers(katex=True))
-@rt('/favicon.ico')
-def favicon(): return FileResponse('favicon.ico')
-@rt
-def stimulus(): return FileResponse('stimulus.wav')
-RESEARCHER_USER,RESEARCHER_PASS = os.getenv('RESEARCHER_USER'),os.getenv('RESEARCHER_PASS')
+def user_auth_before(req, sess):
+    auth = req.scope.get('auth')
+    if auth: return
+    sess['next'] = req.url.path
+    return Redirect('/login')
+    
 def mk_nav(auth=None):
-    authed = [A('Test', href='/test'),
-              A('Data', href=data),
-              A('Logout', href='/logout')]
-    anon   = [A('Login',  href='/login')]
-    return NavBar(*(authed if auth else anon),
-                  brand=A(H3('COBALT'), href=index),
-                  id='navbar', cls='bg-primary text-primary-content py-4 px-16')
-def mk_shell(sess, *content): return Title('COBALT'), mk_nav(sess.get('auth', None)), Main(*content, id='main')
+    authed = [A(href='/tests/new')(H4('Test')), A(href='/tests')(H4('Data')), A(href='/logout')(H4('Logout'))]
+    anon = [A(href='/login')(H4('Login'))]
+    return NavBar(
+        *(authed if auth else anon),
+        brand=A(href='/')(H2('COBALT')),
+        cls='bg-primary text-primary-content py-4 px-16')
+
+def mk_shell(c, req):
+    auth = req.scope.get('auth', None)
+    return mk_nav(auth), Main(id='main')(c)
+
+before = [
+    Beforeware(set_scope_before),
+    Beforeware(user_auth_before, skip=[r'/favicon\.ico', '/login', '/logout', '/'])]
+    
+app,rt = fast_app(
+    title='COBALT',
+    before=before,
+    session_cookie='session_cobalt',
+    secret_key=secrets.token_hex(32),
+    hdrs=Theme.blue.headers(katex=True, apex_charts=True),
+    body_wrap=mk_shell)
+
 @rt
-def index(sess): return mk_shell(sess, Container(render_md(Path('README.md').read_text())))
+def index(): return Container(render_md(Path('README.md').read_text()))
+
+RESEARCHER_USER,RESEARCHER_PASS = os.getenv('RESEARCHER_USER'),os.getenv('RESEARCHER_PASS')
+
 @rt('/login')
 def get(sess):
     if sess.get('auth'): return Redirect('/')
-    return mk_shell(sess, Div(Card(
-        H3('Researcher Login'),
-        P(id='errormsg', cls='text-red-500'),
-        Form(LabelInput('Username', id='username', name='username', autocomplete='username'),
-             LabelInput('Password', id='password', name='password', type='password', autocomplete='current-password'),
-             Button('Log in', cls=ButtonT.primary),
-             hx_post='/login', hx_target='#errormsg'), cls='w-96'), cls='flex justify-center pt-4'))
+    return Div(cls='flex justify-center pt-4')(
+        Card(
+            H3('Researcher Login'),
+            P(id='errormsg', cls=TextT.error+TextT.bold),
+            Form(hx_post='/login', hx_target='#errormsg')(
+                LabelInput('Username', id='username', name='username', autocomplete='username'),
+                LabelInput('Password', id='password', name='password', type='password', autocomplete='current-password'),
+                Button(cls=ButtonT.primary)('Log in')),
+            cls='w-96'))
 
 @rt('/login')
-def post(req, sess, username:str, password:str):
-    if username==RESEARCHER_USER and password==RESEARCHER_PASS: sess['auth'] = True
-    if not sess.get('auth'): return 'Wrong username or password.'
-    return Redirect('/')
+def post(sess, username:str, password:str):
+    if username==RESEARCHER_USER and password==RESEARCHER_PASS:
+        sess['auth'] = True
+        return Redirect(sess.pop('next', '/'))
+    else: return 'Wrong username/password.'
 
 @rt
-def logout(req, sess):
+def logout(sess):
     sess.clear()
     return Redirect('/')
-db = database('cobalt.db')
-class Trial: id:int; initials:str; birthday:str; sex:str; test_date:str; trial:int; gap_ms:float; answer:str; correct:str
-trials = db.create(Trial, pk='id', transform=True)
-@rt('/test')
-def get(req, sess):
-    if not sess.get('patient'):
-        return mk_shell(sess, Div(Card(
-            H3('Patient Information'),
-            Form(LabelInput('Initials', id='initials', name='initials'),
-                LabelInput('Birthday', id='birthday', name='birthday', type='date'),
-                Label('Sex'),
-                Select(Option('Male', value='M'), Option('Female', value='F'), Option('Other', value='O'), name='sex'),
-                Button('Start Test', cls=ButtonT.primary, cls2='mt-4'),
-                hx_post='/test', hx_target='body'), cls='w-96'), cls='pt-4 flex items-center justify-center'))
 
-    state = get_state(sess)
-    return test_page(sess)
+db = database('data/cobalt.db')
 
-@rt('/test')
-def post(req, sess, initials:str, birthday:str, sex:str):
-    sess['patient'] = dict(initials=initials, birthday=birthday, sex=sex)
-    sess['state'] = mk_state()
-    return Redirect('/test')
-@rt('/respond')
-def post(req, sess, answer: str, correct: str):
-    state = get_state(sess)
-    patient = sess.get('patient', {})
-    is_correct = answer == correct
-    state['trial'] += 1
-    state['results'].append(is_correct)
-    trials.insert(Trial(initials=patient.get('initials'), birthday=patient.get('birthday'), sex=patient.get('sex'), test_date=str(date.today()), trial=state['trial'], gap_ms=state['gap_ms'], answer=answer, correct=correct))
+class Test: id:int; initials:str; birthday:str; sex:str; test_date:str; threshold:float; completed:bool=False; srt_db:float=0.0; srt_done:bool=False
+class Trial: id:int; test_id:int; trial_num:int; gap_ms:float; answer:str; correct:str
+class SrtTrial: id:int; test_id:int; trial_num:int; level_db:float; word:str; correct:bool
+tests_db = db.create(Test, pk='id')
+trials_db = db.create(Trial, pk='id', foreign_keys=[('test_id', 'test', 'id')])
+srt_trials_db = db.create(SrtTrial, pk='id', foreign_keys=[('test_id', 'test', 'id')])
 
-    new_direction = None
-    step = 0.8
-    if is_correct:
-        state['correct_streak'] += 1
-        if state['correct_streak'] >= 2:
-            new_direction = 'down'
-            state['gap_ms'] = state['gap_ms'] * step
-            state['correct_streak'] = 0
-    else:
-        state['correct_streak'] = 0
-        new_direction = 'up'
-        state['gap_ms'] = state['gap_ms'] / step
+def sort_th(col, sort, dir):
+    new_dir = 'desc' if col==sort and dir=='asc' else 'asc'
+    mark = (' ↑' if dir=='asc' else ' ↓') if col==sort else ''
+    return Th(A(hx_get=f'/tests?sort={col}&dir={new_dir}', hx_target='#tests-table', hx_swap='outerHTML', hx_push_url='true')(col+mark))
 
-    if new_direction and state['last_direction'] and new_direction != state['last_direction']: state['reversals'].append(state['gap_ms'])
-    if new_direction: state['last_direction'] = new_direction
-    sess['state'] = state
-    return Redirect('/test')
-def patient_thresholds(sex=None, date_from=None, date_to=None):
-    q = "SELECT initials,birthday,sex,test_date,gap_ms FROM trial t1 WHERE trial=(SELECT MAX(trial) FROM trial t2 WHERE t2.initials=t1.initials AND t2.test_date=t1.test_date)"
-    conds,params = [],[]
-    if sex: conds.append("sex=?"); params.append(sex)
-    if date_from: conds.append("test_date>=?"); params.append(date_from)
-    if date_to: conds.append("test_date<=?"); params.append(date_to)
-    if conds: q = f"SELECT * FROM ({q}) WHERE " + " AND ".join(conds)
-    return list(db.execute(q, params))
+def row_link(tid, v): return Td(A(href=f'/tests/{tid}', cls='block w-full')(v))
 
-def mk_histogram(rows):
-    vals = [r[4] for r in rows]
-    if not vals: return None
-    fig,ax = plt.subplots(figsize=(8,4))
-    ax.hist(vals, bins=100, color='steelblue', edgecolor='white')
-    ax.set(xlabel='Gap (ms)', ylabel='Count', title='TOJ Thresholds')
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', bbox_inches='tight')
-    plt.close(fig)
-    return base64.b64encode(buf.getvalue()).decode()
+@rt('/tests')
+def get(sort:str='id', dir:str='desc'):
+    cols = tests_db.columns_dict.keys()
+    if sort not in cols: sort = 'id'
+    tsts = list(map(asdict, tests_db(order_by=f'{sort} {"desc" if dir=="desc" else "asc"}')))
+    if not tsts: return Div(cls='flex justify-center pt-8')(
+        Card(
+            H3('No tests found'),
+            P('Create ', A(href='/tests/new', cls=AT.primary)('a new test'), ' to get started.'),
+            cls=TextT.center))
+    return Table(id='tests-table')(
+        Thead(Tr(*[sort_th(col, sort, dir) for col in cols])),
+        Tbody(*[Tr(*[row_link(tst['id'], tst[col]) for col in cols]) for tst in tsts]))
 
-def mk_slicers(sex='', date_from='', date_to=''):
-    frm = Form(
-        Select(Option('All sexes',value=''),Option('Male',value='M'),Option('Female',value='F'),Option('Other',value='O'), name='sex'),
-        LabelInput('From', id='date_from', name='date_from', type='date', value=date_from),
-        LabelInput('To', id='date_to', name='date_to', type='date', value=date_to),
-        Button('Filter', cls=ButtonT.primary),
-        hx_get=data_chart, hx_target='#chart', cls='flex gap-4 items-end mt-4')
-    return Div(frm, A('Download', href=data_csv.to(), cls=ButtonT.primary), cls='flex gap-4 items-end mt-4')
+STEP,START_GAP,N_REVERSALS = 0.8,100.0,6
 
-@rt
-def data_chart(req, session, sex:str='', date_from:str='', date_to:str=''):
-    rows = patient_thresholds(sex or None, date_from or None, date_to or None)
-    img = mk_histogram(rows)
-    return Div(P(f'{len(rows)} patient sessions'), Img(src=f'data:image/png;base64,{img}') if img else P('No data', cls='text-center text-gray-400 py-8'), id='chart')
+def step_state(gap, streak, last_dir, ok):
+    "Advance staircase one trial; returns new gap, streak, direction, and whether it reversed"
+    new_dir = None
+    if ok:
+        streak += 1
+        if streak>1: gap,streak,new_dir = gap*STEP,0,'down'
+    else: gap,streak,new_dir = gap/STEP,0,'up'
+    return gap,streak,(new_dir or last_dir),bool(new_dir and last_dir and new_dir!=last_dir)
 
-@rt
-def data_csv(req, session):
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    cols = [col.name for col in trials.columns]
-    w.writerow(cols)
-    w.writerows([[getattr(r, c) for c in cols] for r in trials()])
-    return Response(buf.getvalue(), media_type='text/csv', headers={'Content-Disposition':'attachment; filename="cobalt_data.csv"'})
+def replay(trls):
+    "Derive current staircase state from a test's trials"
+    gap,streak,last_dir,revs = START_GAP,0,None,[]
+    for t in trls:
+        gap,streak,last_dir,rev = step_state(gap, streak, last_dir, t.answer==t.correct)
+        if rev: revs.append(gap)
+    return gap,streak,last_dir,revs
 
-@rt
-def data(req, session):
-    rows = trials()
-    return htmx(req, Container(
-        H3('Trial Data'),
-        mk_slicers(),
-        Div(id='chart', hx_get=data_chart, hx_trigger='load')))
+def get_trials(tid): return trials_db(where='test_id=?', where_args=[tid], order_by='trial_num')
+
+@rt('/tests/new')
+def get():
+    return Div(cls='pt-4 flex justify-center')(
+        Card(
+            H3('New test'),
+            Form(method='post', action='/tests')(
+                LabelInput('Initials', id='initials', name='initials', required=True),
+                LabelInput('Birthday', id='birthday', name='birthday', type='date', required=True),
+                Fieldset(
+                    Legend(cls=TextT.medium)('Sex'),
+                    DivHStacked(
+                        LabelRadio('Male', id='sex-m', name='sex', value='M'),
+                        LabelRadio('Female', id='sex-f', name='sex', value='F'),
+                        LabelRadio('Other', id='sex-o', name='sex', value='O'),
+                        cls='gap-4 p-4')),
+                Button(cls=ButtonT.primary)('Start test')),
+            cls='w-96'))
+
+@rt('/tests')
+def post(initials:str, birthday:str, sex:str):
+    t = tests_db.insert(Test(initials=initials, birthday=birthday, sex=sex, test_date=str(date.today()), threshold=0.0))
+    return Redirect(f'/tests/{t.id}')
+
+def patient_cards(t, **attrs):
+    return DivHStacked(
+        Card(
+            P(f'Initials: {t.initials}'),
+            P(f'Birthday: {t.birthday}'),
+            P(f'Sex: {t.sex}'),
+            cls='w-full'),
+        Card(P(f'Threshold: {t.threshold:.1f} ms' if t.completed else 'Threshold: pending'),
+            P(f'Test date: {t.test_date}'),
+            P(f'Status: {'Completed' if t.completed else 'In progress'}'),
+            cls='w-full'),
+        cls='items-stretch gap-4', id='patient-card', **attrs)
+
+def gap_chart(trl):
+    return ApexChart(
+        opts={
+            'chart': {'type':'line', 'zoom':{'enabled':False}, 'toolbar':{'show':False}, 'height':380},
+            'series': [{'name':'Gap (ms)', 'data':[t.gap_ms for t in trl]}],
+            'xaxis': {'title':{'text':'Trial number'}, 'categories':[t.trial_num for t in trl]},
+            'yaxis': {'title':{'text':'Gap (ms)'}, 'decimalsInFloat':0}},
+        cls='w-full')
+
+def done_card(t, n):
+    return Card(
+        H4('Test complete'),
+        P(f'Trials: {n}'),
+        P(cls=TextPresets.bold_lg)(f'Threshold: {t.threshold:.0f} ms'),
+        A(href='/tests/new', cls=AT.primary)('New test'))
+
+def test_panel(tid):
+    t = tests_db[tid]
+    trl = get_trials(tid)
+    gap,_,_,revs = replay(trl)
+    panel = done_card(t, len(trl)) if t.completed else trial_card(tid, len(trl)+1, gap, revs, random.choice(['left','right']), toj_gain(t.srt_db))
+    return Div(id='test-panel', cls='flex flex-col gap-4')(panel, gap_chart(trl))
+
+@rt('/tests/{tid}')
+def get(tid:int):
+    t = tests_db[tid]
+    hdr = (Script(src='/js/playStimulus.js'), patient_cards(t))
+    if not t.srt_done:
+        trl = get_srt_trials(tid)
+        lvl,_,revs = srt_replay(trl)
+        return Container(*hdr, srt_card(tid, len(trl)+1, lvl, next_word(trl), revs), srt_chart(trl), cls='flex flex-col gap-4 p-8')
+    if not srt_ok(t.srt_db): return Container(*hdr, headroom_card(tid, t), cls='flex flex-col gap-4 p-8')
+    panel = test_panel(tid)
+    return Container(*hdr, panel, cls='flex flex-col gap-4 p-8')
+
+@rt('/tests/{tid}/trials')
+def post(tid:int, answer:str, correct:str):
+    t = tests_db[tid]
+    if t.completed: return test_panel(tid)
+    trl = get_trials(tid)
+    gap,streak,last_dir,revs = replay(trl)
+    ngap,_,_,rev = step_state(gap, streak, last_dir, answer==correct)
+    trials_db.insert(Trial(test_id=tid, trial_num=len(trl)+1, gap_ms=gap, answer=answer, correct=correct))
+    if rev: revs.append(ngap)
+    if len(revs)>=N_REVERSALS:
+        tests_db.update(dict(id=tid, threshold=sum(revs[-4:])/4, completed=True))
+        return test_panel(tid), patient_cards(tests_db[tid], hx_swap_oob='true')
+    return test_panel(tid)
+
+def trial_card(tid, num, gap, revs, side, lvl):
+    return Card(
+        H4(f'Trial {num} — gap {gap:.1f} ms — reversals {len(revs)}/{N_REVERSALS}'),
+        P('Put on headphones. Click play, then say which ear heard the sound first.'),
+        Button(submit=False, onclick=f'playTOJ("{side}", {gap}, {lvl})', cls=ButtonT.secondary)('Play sound'),
+        Form(hx_post=f'/tests/{tid}/trials', hx_target='#test-panel')(
+            Input(type='hidden', name='correct', value=side),
+            DivHStacked(
+                LabelRadio('Left', id='answer-left', name='answer', value='left', required=True, container=None),
+                LabelRadio('Right', id='answer-right', name='answer', value='right', required=True, container=None),
+                Button(id='answer-next', cls=ButtonT.primary)('Next trial'))),
+        Style('input[type=radio]:checked ~ #answer-next {visibility:visible} #answer-next {visibility:hidden}'))
+
+@rt('/tests/{tid}/srt')
+def post(tid:int, word:str, level_db:float, correct:int):
+    t = tests_db[tid]
+    if t.srt_done: return Redirect(f'/tests/{tid}')
+    trl = get_srt_trials(tid)
+    lvl,last_dir,revs = srt_replay(trl)
+    nlvl,ndir,rev = srt_step(lvl, last_dir, len(revs), bool(correct))
+    srt_trials_db.insert(SrtTrial(test_id=tid, trial_num=len(trl)+1, level_db=level_db, word=word, correct=bool(correct)))
+    if rev: revs.append(nlvl)
+    if len(revs)>=SRT_REVERSALS: tests_db.update(dict(id=tid, srt_db=sum(revs[-4:])/4, srt_done=True))
+    return Redirect(f'/tests/{tid}')
+
+@rt('/tests/{tid}/recalibrate')
+def post(tid:int):
+    srt_trials_db.delete_where('test_id=?', [tid])
+    tests_db.update(dict(id=tid, srt_db=0.0, srt_done=False))
+    return Redirect(f'/tests/{tid}')
+
+SRT_START,SRT_BIG,SRT_SMALL,SRT_REVERSALS,SRT_HEADROOM = -30.0,5.0,2.0,6,50.0
+SPONDEES = ('abelha boneca cadeira').split()
+
+def srt_step(lvl, last_dir, nrev, ok):
+    "Advance SRT staircase one trial; returns new level, direction, and whether it reversed"
+    step = SRT_BIG if nrev<1 else SRT_SMALL
+    new_dir = 'down' if ok else 'up'
+    return (lvl-step if ok else lvl+step),new_dir,bool(last_dir and new_dir!=last_dir)
+
+def srt_replay(trl):
+    "Derive current SRT staircase state from a test's trials"
+    lvl,last_dir,revs = SRT_START,None,[]
+    for t in trl:
+        lvl,last_dir,rev = srt_step(lvl, last_dir, len(revs), t.correct)
+        if rev: revs.append(lvl)
+    return lvl,last_dir,revs
+
+def get_srt_trials(tid): return srt_trials_db(where='test_id=?', where_args=[tid], order_by='trial_num')
+def next_word(trl): return random.choice([w for w in SPONDEES if w not in {t.word for t in trl}] or SPONDEES)
+def toj_gain(srt_db): return srt_db + SRT_HEADROOM
+def srt_ok(srt_db): return srt_db <= -SRT_HEADROOM
+
+def srt_chart(trl):
+    return ApexChart(opts={
+            'chart': {'type':'line', 'zoom':{'enabled':False}, 'toolbar':{'show':False}, 'height':380},
+            'series': [{'name':'Level (dB)', 'data':[t.level_db for t in trl]}],
+            'xaxis': {'title':{'text':'Trial number'}, 'categories':[t.trial_num for t in trl]},
+            'yaxis': {'title':{'text':'Level (dB)'}, 'decimalsInFloat':0}},
+        cls='w-full')
+
+def srt_card(tid, num, lvl, word, revs):
+    return Card(
+        H4(f'Calibration trial {num} — {lvl:.0f} dB — reversals {len(revs)}/{SRT_REVERSALS}'),
+        P('Play the word, then mark whether the patient repeated it correctly.'),
+        P(word, cls='text-3xl font-bold tracking-wide py-2'),
+        Button('Play word', type='button', onclick=f'playSpondee("{word}", {lvl})', cls=ButtonT.secondary),
+        Form(method='post', action=f'/tests/{tid}/srt')(
+            Input(type='hidden', name='word', value=word),
+            Input(type='hidden', name='level_db', value=str(lvl)),
+            DivHStacked(
+                Button('Correct', name='correct', value='1', cls=ButtonT.primary),
+                Button('Incorrect', name='correct', value='0', cls=ButtonT.secondary),
+                cls='gap-4 pt-4')))
+
+def headroom_card(tid, t):
+    return Card(
+        H4('Insufficient headroom', cls='text-red-500'),
+        P(f'SRT came out at {t.srt_db:.1f} dB, so the TOJ level would be {toj_gain(t.srt_db):.1f} dB — above full scale.'),
+        P('Set the tablet volume to maximum and recalibrate.'),
+        Form(method='post', action=f'/tests/{tid}/recalibrate')(Button('Recalibrate', cls=ButtonT.primary)))
+
 serve()
