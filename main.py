@@ -181,13 +181,9 @@ def test_panel(tid):
 def get(tid:int):
     t = tests_db[tid]
     hdr = (Script(src='/js/playStimulus.js'), patient_cards(t))
-    if not t.srt_done:
-        trl = get_srt_trials(tid)
-        lvl,_,revs = srt_replay(trl)
-        return Container(*hdr, srt_card(tid, len(trl)+1, lvl, next_word(trl), revs), srt_chart(trl), cls='flex flex-col gap-4 p-8')
+    if not t.srt_done: return Container(*hdr, srt_panel(tid), cls='flex flex-col gap-4 p-8')
     if not srt_ok(t.srt_db): return Container(*hdr, headroom_card(tid, t), cls='flex flex-col gap-4 p-8')
-    panel = test_panel(tid)
-    return Container(*hdr, panel, cls='flex flex-col gap-4 p-8')
+    return Container(*hdr, test_panel(tid), cls='flex flex-col gap-4 p-8')
 
 @rt('/tests/{tid}/trials')
 def post(tid:int, answer:str, correct:str):
@@ -216,17 +212,58 @@ def trial_card(tid, num, gap, revs, side, lvl):
                 Button(id='answer-next', cls=ButtonT.primary)('Next trial'))),
         Style('input[type=radio]:checked ~ #answer-next {visibility:visible} #answer-next {visibility:hidden}'))
 
+def srt_panel(tid):
+    t = tests_db[tid]
+    trl = get_srt_trials(tid)
+    lvl,_,revs = srt_replay(trl)
+    return Div(id='srt-panel', cls='flex flex-col gap-4')(
+        srt_card(tid, len(trl)+1, lvl, next_word(trl), revs),
+        srt_chart(trl))
+
+def srt_chart(trl):
+    return ApexChart(opts=dict(
+            chart=dict(type='line', zoom=dict(enabled=False), toolbar=dict(show=False), height=380),
+            series=[dict(name='Level (dB)', data=[t.level_db for t in trl])],
+            xaxis=dict(title=dict(text='Trial number'), categories=[t.trial_num for t in trl]),
+            yaxis=dict(title=dict(text='Level (dB)'), decimalsInFloat=0)),
+        cls='w-full')
+
+def srt_card(tid, num, lvl, word, revs):
+    return Card(
+        H4(f'Calibration trial {num} — {lvl:.0f} dB — reversals {len(revs)}/{SRT_REVERSALS}'),
+        P('Play the word, then mark whether the patient repeated it correctly.'),
+        P(cls='text-3xl font-bold tracking-wide py-2')(word),
+        Button(type='button', onclick=f'playSpondee("{word}", {lvl})', cls=ButtonT.secondary)('Play word'),
+        Form(hx_post=f'/tests/{tid}/srt', hx_target='#srt-panel', hx_swap='outerHTML')(
+            Input(type='hidden', name='word', value=word),
+            Input(type='hidden', name='level_db', value=str(lvl)),
+            DivHStacked(
+                Button(name='correct', value='1', cls=ButtonT.primary)('Correct'),
+                Button(name='correct', value='0', cls=ButtonT.secondary)('Incorrect'),
+                cls='gap-4 pt-4')))
+
+def headroom_card(tid, t):
+    return Card(
+        H4(cls=TextT.error+TextT.bold)('Insufficient headroom'),
+        P(f'SRT came out at {t.srt_db:.1f} dB, so the TOJ level would be {toj_gain(t.srt_db):.1f} dB — above full scale.'),
+        P('Set the tablet volume to maximum and recalibrate.'),
+        Form(method='post', action=f'/tests/{tid}/recalibrate')(Button(cls=ButtonT.primary)('Recalibrate')))
+
 @rt('/tests/{tid}/srt')
 def post(tid:int, word:str, level_db:float, correct:int):
     t = tests_db[tid]
-    if t.srt_done: return Redirect(f'/tests/{tid}')
+    if t.srt_done: return
     trl = get_srt_trials(tid)
     lvl,last_dir,revs = srt_replay(trl)
     nlvl,ndir,rev = srt_step(lvl, last_dir, len(revs), bool(correct))
     srt_trials_db.insert(SrtTrial(test_id=tid, trial_num=len(trl)+1, level_db=level_db, word=word, correct=bool(correct)))
     if rev: revs.append(nlvl)
-    if len(revs)>=SRT_REVERSALS: tests_db.update(dict(id=tid, srt_db=sum(revs[-4:])/4, srt_done=True))
-    return Redirect(f'/tests/{tid}')
+    if len(revs)>=SRT_REVERSALS:
+        tests_db.update(dict(id=tid, srt_db=sum(revs[-4:])/4, srt_done=True))
+        t = tests_db[tid]
+        panel = headroom_card(tid, t) if not srt_ok(t.srt_db) else test_panel(tid)
+        return Div(id='srt-panel')(panel), patient_cards(t, hx_swap_oob='true')
+    return srt_panel(tid)
 
 @rt('/tests/{tid}/recalibrate')
 def post(tid:int):
@@ -255,34 +292,5 @@ def get_srt_trials(tid): return srt_trials_db(where='test_id=?', where_args=[tid
 def next_word(trl): return random.choice([w for w in SPONDEES if w not in {t.word for t in trl}] or SPONDEES)
 def toj_gain(srt_db): return srt_db + SRT_HEADROOM
 def srt_ok(srt_db): return srt_db <= -SRT_HEADROOM
-
-def srt_chart(trl):
-    return ApexChart(opts={
-            'chart': {'type':'line', 'zoom':{'enabled':False}, 'toolbar':{'show':False}, 'height':380},
-            'series': [{'name':'Level (dB)', 'data':[t.level_db for t in trl]}],
-            'xaxis': {'title':{'text':'Trial number'}, 'categories':[t.trial_num for t in trl]},
-            'yaxis': {'title':{'text':'Level (dB)'}, 'decimalsInFloat':0}},
-        cls='w-full')
-
-def srt_card(tid, num, lvl, word, revs):
-    return Card(
-        H4(f'Calibration trial {num} — {lvl:.0f} dB — reversals {len(revs)}/{SRT_REVERSALS}'),
-        P('Play the word, then mark whether the patient repeated it correctly.'),
-        P(word, cls='text-3xl font-bold tracking-wide py-2'),
-        Button('Play word', type='button', onclick=f'playSpondee("{word}", {lvl})', cls=ButtonT.secondary),
-        Form(method='post', action=f'/tests/{tid}/srt')(
-            Input(type='hidden', name='word', value=word),
-            Input(type='hidden', name='level_db', value=str(lvl)),
-            DivHStacked(
-                Button('Correct', name='correct', value='1', cls=ButtonT.primary),
-                Button('Incorrect', name='correct', value='0', cls=ButtonT.secondary),
-                cls='gap-4 pt-4')))
-
-def headroom_card(tid, t):
-    return Card(
-        H4('Insufficient headroom', cls='text-red-500'),
-        P(f'SRT came out at {t.srt_db:.1f} dB, so the TOJ level would be {toj_gain(t.srt_db):.1f} dB — above full scale.'),
-        P('Set the tablet volume to maximum and recalibrate.'),
-        Form(method='post', action=f'/tests/{tid}/recalibrate')(Button('Recalibrate', cls=ButtonT.primary)))
 
 serve()
