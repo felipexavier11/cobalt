@@ -141,6 +141,16 @@ def post(initials:str, birthday:str, sex:str):
     t = tests_db.insert(Test(initials=initials, birthday=birthday, sex=sex, test_date=str(date.today()), threshold=0.0))
     return Redirect(f'/tests/{t.id}')
 
+def plot(x, y, xlabel='', ylabel='', title='', precision=0, cls=None, id=None, name=None, **kwargs):
+    chart = dict(type='line', zoom=dict(enabled=False), toolbar=dict(show=False), height=380) | kwargs
+    opts = dict(
+        chart=chart,
+        series=[dict(data=y, **({'name':name} if name else {}))],
+        xaxis=dict(title=dict(text=xlabel), categories=x),
+        yaxis=dict(title=dict(text=ylabel), decimalsInFloat=precision))
+    if title: opts['title'] = dict(text=title)
+    return ApexChart(opts=opts, cls=cls, id=id)
+
 def patient_cards(t, **attrs):
     return DivHStacked(
         Card(
@@ -154,14 +164,7 @@ def patient_cards(t, **attrs):
             cls='w-full'),
         cls='items-stretch gap-4', id='patient-card', **attrs)
 
-def gap_chart(trl):
-    return ApexChart(
-        opts={
-            'chart': {'type':'line', 'zoom':{'enabled':False}, 'toolbar':{'show':False}, 'height':380},
-            'series': [{'name':'Gap (ms)', 'data':[t.gap_ms for t in trl]}],
-            'xaxis': {'title':{'text':'Trial number'}, 'categories':[t.trial_num for t in trl]},
-            'yaxis': {'title':{'text':'Gap (ms)'}, 'decimalsInFloat':0}},
-        cls='w-full')
+def gap_chart(trl): return plot([t.trial_num for t in trl], [t.gap_ms for t in trl], 'Trial number', 'Gap (ms)', precision=0, name='Gap (ms)', cls='w-full')
 
 def done_card(t, n):
     return Card(
@@ -220,13 +223,7 @@ def srt_panel(tid):
         srt_card(tid, len(trl)+1, lvl, next_word(trl), revs),
         srt_chart(trl))
 
-def srt_chart(trl):
-    return ApexChart(opts=dict(
-            chart=dict(type='line', zoom=dict(enabled=False), toolbar=dict(show=False), height=380),
-            series=[dict(name='Level (dB)', data=[t.level_db for t in trl])],
-            xaxis=dict(title=dict(text='Trial number'), categories=[t.trial_num for t in trl]),
-            yaxis=dict(title=dict(text='Level (dB)'), decimalsInFloat=0)),
-        cls='w-full')
+def srt_chart(trl): return plot([t.trial_num for t in trl], [t.level_db for t in trl], 'Trial number', 'Level (dB)', precision=0, name='Level (dB)', cls='w-full')
 
 def srt_card(tid, num, lvl, word, revs):
     return Card(
