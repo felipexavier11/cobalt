@@ -1,3 +1,4 @@
+.plash
 *.env
 *.db*
 solveit_settings.json
