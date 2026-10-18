@@ -202,19 +202,22 @@ def post(tid:int, answer:str, correct:str):
         return test_panel(tid), patient_cards(tests_db[tid], hx_swap_oob='true')
     return test_panel(tid)
 
-def css_arrow(dir, w='[2rem]', h='[1rem]'):
+def css_arrow(dir, w='[2rem]', h='[0.5rem]'):
     side = 'l' if dir=='r' else 'r'
     return Span(cls=f'border-y-{h} border-y-transparent border-{side}-{w} border-{side}-current')
 
 def trial_card(tid, num, gap, revs, side, lvl):
     btn_attrs = dict(type='button', name='answer', hx_post=f'/tests/{tid}/trials', hx_target='#test-panel', hx_vals=f'{{"correct":"{side}"}}')
+    btn_cls = 'flex-auto py-8 gap-2'
     return Card(
         H4(f'Trial {num} — gap {gap:.1f} ms — reversals {len(revs)}/{N_REVERSALS}'),
         P('Put on headphones. Click play, then choose the ear that heard the sound first.'),
         Button(type='button', autofocus=True, onclick=f'playTOJ("{side}", {gap}, {lvl})')('Play sound'),
         DivHStacked(
-            Button(**btn_attrs, value='left', cls=ButtonT.destructive+' flex-auto py-8', hx_trigger="click, keyup[key=='ArrowLeft'] from:body")(css_arrow('l')),
-            Button(**btn_attrs, value='right', cls=ButtonT.primary+' flex-auto py-8', hx_trigger="click, keyup[key=='ArrowRight'] from:body")(css_arrow('r')),
+            Button(**btn_attrs, value='left', cls=ButtonT.destructive+btn_cls, hx_trigger="click, keyup[key=='ArrowLeft'] from:body")(
+                css_arrow('l'), P(cls=TextT.xl)('Left')),
+            Button(**btn_attrs, value='right', cls=ButtonT.primary+btn_cls, hx_trigger="click, keyup[key=='ArrowRight'] from:body")(
+                P(cls=TextT.xl)('Right'), css_arrow('r')),
             cls='gap-4 pt-4 w-full'))
 
 def srt_panel(tid):
