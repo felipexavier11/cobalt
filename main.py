@@ -33,7 +33,7 @@ app,rt = fast_app(
     title='COBALT',
     before=before,
     session_cookie='session_cobalt',
-    secret_key=secrets.token_hex(32),
+    secret_key=os.environ.get('SECRET_KEY', secrets.token_hex(32)),
     hdrs=Theme.blue.headers(katex=True, apex_charts=True),
     body_wrap=mk_shell)
 
