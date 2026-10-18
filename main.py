@@ -131,7 +131,6 @@ def get():
                     DivHStacked(
                         LabelRadio('Male', id='sex-m', name='sex', value='M'),
                         LabelRadio('Female', id='sex-f', name='sex', value='F'),
-                        LabelRadio('Other', id='sex-o', name='sex', value='O'),
                         cls='gap-4 p-4')),
                 Button(cls=ButtonT.primary)('Start test')),
             cls='w-96'))
