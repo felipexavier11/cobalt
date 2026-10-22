@@ -77,6 +77,16 @@ tests_db = db.create(Test, pk='id')
 trials_db = db.create(Trial, pk='id', foreign_keys=[('test_id', 'test', 'id')])
 srt_trials_db = db.create(SrtTrial, pk='id', foreign_keys=[('test_id', 'test', 'id')])
 
+def age_at(t):
+    bday = date.fromisoformat(t.birthday)
+    tday = date.fromisoformat(t.test_date)
+    return tday.year-bday.year-((tday.month,tday.day)<(bday.month,bday.day))
+
+def test_sem(tid):
+    revs = replay(get_trials(tid))[3][-4:]
+    vals = np.array([gap for _,gap in revs])
+    return vals.std(ddof=1)/np.sqrt(len(vals)) if len(vals)>1 else 0
+
 def sort_th(col, sort, dir):
     new_dir = 'desc' if col==sort and dir=='asc' else 'asc'
     mark = (' ↑' if dir=='asc' else ' ↓') if col==sort else ''
@@ -86,17 +96,22 @@ def row_link(tid, v): return Td(A(href=f'/tests/{tid}', cls='block w-full')(v))
 
 @rt('/tests')
 def get(sort:str='id', dir:str='desc'):
-    cols = tests_db.columns_dict.keys()
+    cols = [*tests_db.columns_dict.keys(), 'age', 'sem']
     if sort not in cols: sort = 'id'
-    tsts = list(map(asdict, tests_db(order_by=f'{sort} {"desc" if dir=="desc" else "asc"}')))
+    tsts = list(tests_db(order_by=f'{sort} {"desc" if dir=="desc" else "asc"}')) if sort in cols else list(tests_db(order_by=f'id {"desc" if dir=="desc" else "asc"}'))
     if not tsts: return Div(cls='flex justify-center pt-8')(
         Card(
             H3('No tests found'),
             P('Create ', A(href='/tests/new', cls=AT.primary)('a new test'), ' to get started.'),
             cls=TextT.center))
+    def val(t, col):
+        if col=='age': return f'{age_at(t)} y'
+        if col=='sem': return f'{test_sem(t.id):.1f} ms' if t.completed else 'pending'
+        if col=='threshold': return f'{getattr(t, col):.1f}' if t.completed else 'pending'
+        return getattr(t, col)
     return Table(id='tests-table')(
         Thead(Tr(*[sort_th(col, sort, dir) for col in cols])),
-        Tbody(*[Tr(*[row_link(tst['id'], tst[col]) for col in cols]) for tst in tsts]))
+        Tbody(*[Tr(*[row_link(t.id, val(t, col)) for col in cols]) for t in tsts]))
 
 STEP,START_GAP,N_REVERSALS = 0.8,100.0,6
 
@@ -159,11 +174,13 @@ def patient_cards(t, **attrs):
         Card(
             P(f'Initials: {t.initials}'),
             P(f'Birthday: {t.birthday}'),
+            P(f'Age at test: {age_at(t)}'),
             P(f'Sex: {t.sex}'),
             cls='w-full'),
-        Card(P(f'Threshold: {t.threshold:.1f} ms' if t.completed else 'Threshold: pending'),
+        Card(
+            P(f'Threshold: {t.threshold:.1f} ms ± {test_sem(t.id):.1f}' if t.completed else 'Threshold: pending'),
             P(f'Test date: {t.test_date}'),
-            P(f'Status: {'Completed' if t.completed else 'In progress'}'),
+            P(f'Status: {"Completed" if t.completed else "In progress"}'),
             cls='w-full'),
         cls='items-stretch gap-4', id='patient-card', **attrs)
 
@@ -178,7 +195,7 @@ def gap_chart(trl, revs, next_num=None, next_gap=None):
     markers = dict(size=0, discrete=[dict(seriesIndex=0, dataPointIndex=i, size=7, fillColor='#dc2626', strokeColor='#fff', strokeWidth=2) for i in idxs])
     annotations = dict(
         yaxis=[
-            dict(y=th-sem, y2=th+sem, fillColor='#ef4444', opacity=.15, label=dict(text=f'{th:.0f} ± {sem:.0f} ms', style=dict(background='#ef4444', color='#fff'))),
+            dict(y=th-sem, y2=th+sem, fillColor='#ef4444', opacity=.15, label=dict(text=f'{th:.1f} ± {sem:.1f} ms', style=dict(background='#ef4444', color='#fff'))),
             dict(y=th, borderColor='#ef4444', strokeDashArray=0)])
     return plot(x, y, 'Trial number', 'Gap (ms)', precision=0, name='Gap (ms)', cls='w-full', annotations=annotations, markers=markers)
 
@@ -186,8 +203,9 @@ def done_card(t, n):
     return Card(
         H4('Test complete'),
         P(f'Trials: {n}'),
-        P(cls=TextPresets.bold_lg)(f'Threshold: {t.threshold:.0f} ms'),
+        P(cls=TextPresets.bold_lg)(f'Threshold: {t.threshold:.1f} ± {test_sem(t.id):.1f} ms'),
         A(href='/tests/new', cls=AT.primary)('New test'))
+
 
 def test_panel(tid):
     t = tests_db[tid]
