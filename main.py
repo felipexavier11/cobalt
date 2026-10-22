@@ -178,7 +178,7 @@ def patient_cards(t, **attrs):
             P(f'Sex: {t.sex}'),
             cls='w-full'),
         Card(
-            P(f'Threshold: {t.threshold:.1f} ms ± {test_sem(t.id):.1f}' if t.completed else 'Threshold: pending'),
+            P(f'Threshold: {t.threshold:.1f} ± {test_sem(t.id):.1f} ms' if t.completed else 'Threshold: pending'),
             P(f'Test date: {t.test_date}'),
             P(f'Status: {"Completed" if t.completed else "In progress"}'),
             cls='w-full'),
