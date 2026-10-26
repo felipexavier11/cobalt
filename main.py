@@ -1,9 +1,11 @@
-import os,random,secrets
+import io,os,random,secrets
 from datetime import date
-import numpy as np
 from fasthtml.common import *
 from fastlite import *
 from monsterui.all import *
+import numpy as np
+from openpyxl.styles import Font,PatternFill
+import pandas as pd
 
 def set_scope_before(req, sess):
     req.scope.setdefault('auth', sess.get('auth'))
@@ -90,28 +92,42 @@ def test_sem(tid):
 def sort_th(col, sort, dir):
     new_dir = 'desc' if col==sort and dir=='asc' else 'asc'
     mark = (' ↑' if dir=='asc' else ' ↓') if col==sort else ''
-    return Th(A(hx_get=f'/tests?sort={col}&dir={new_dir}', hx_target='#tests-table', hx_swap='outerHTML', hx_push_url='true')(col+mark))
+    return Th(A(hx_get=f'/tests?sort={col}&dir={new_dir}', hx_target='#main', hx_push_url='true')(col+mark))
 
 def row_link(tid, v): return Td(A(href=f'/tests/{tid}', cls='block w-full')(v))
 
+def sorted_tests(sort, dir):
+    tsts = list(tests_db())
+    rev = dir == 'desc'
+    if sort == 'age': return sorted(tsts, key=age_at, reverse=rev)
+    if sort == 'sem':
+        done = [t for t in tsts if t.completed]
+        pending = [t for t in tsts if not t.completed]
+        return sorted(done, key=lambda t:test_sem(t.id), reverse=rev)+pending
+    return list(tests_db(order_by=f'{sort} {"desc" if rev else "asc"}'))
+
 @rt('/tests')
 def get(sort:str='id', dir:str='desc'):
-    cols = [*tests_db.columns_dict.keys(), 'age', 'sem']
-    if sort not in cols: sort = 'id'
-    tsts = list(tests_db(order_by=f'{sort} {"desc" if dir=="desc" else "asc"}')) if sort in cols else list(tests_db(order_by=f'id {"desc" if dir=="desc" else "asc"}'))
-    if not tsts: return Div(cls='flex justify-center pt-8')(
+    if not tests_db(): return Div(cls='flex justify-center pt-8')(
         Card(
             H3('No tests found'),
             P('Create ', A(href='/tests/new', cls=AT.primary)('a new test'), ' to get started.'),
             cls=TextT.center))
+    cols = [*tests_db.columns_dict.keys(), 'age', 'sem']
+    if sort not in cols: sort = 'id'
+    tsts = sorted_tests(sort, dir)
     def val(t, col):
         if col=='age': return f'{age_at(t)} y'
         if col=='sem': return f'{test_sem(t.id):.1f} ms' if t.completed else 'pending'
-        if col=='threshold': return f'{getattr(t, col):.1f}' if t.completed else 'pending'
+        if col=='threshold': return f'{t.threshold:.1f}' if t.completed else 'pending'
         return getattr(t, col)
-    return Table(id='tests-table')(
+    tests_table = Table(
         Thead(Tr(*[sort_th(col, sort, dir) for col in cols])),
         Tbody(*[Tr(*[row_link(t.id, val(t, col)) for col in cols]) for t in tsts]))
+    return Div(cls='flex flex-col gap-4 p-4')(
+        DivRAligned(A(href='/tests/export', cls=ButtonT.primary)('Export to Excel')),
+        tests_table)
+
 
 STEP,START_GAP,N_REVERSALS = 0.8,100.0,6
 
@@ -156,6 +172,96 @@ def get():
 def post(initials:str, birthday:str, sex:str):
     t = tests_db.insert(Test(initials=initials, birthday=birthday, sex=sex, test_date=str(date.today()), threshold=0.0))
     return Redirect(f'/tests/{t.id}')
+
+DEFAULT_WIDTH = 16
+COLUMN_WIDTHS = dict(README=dict(field=32, description=48))
+COBALT = PatternFill('solid', fgColor='2F5597')
+OFF_WHITE = PatternFill('solid', fgColor='F8FAFC')
+HEADER_FONT = Font(color='FFFFFF', bold=True)
+DATA_HEADERS = dict(
+    tests=dict(
+        test_id='Test ID', initials='Initials', birthday='Birthday', sex='Sex', test_date='Test date', age='Age at test', threshold_ms='Threshold (ms)', sem_ms='SEM (ms)', completed='Completed', srt_db='SRT level (dB)', srt_done='SRT completed'),
+    trials=dict(
+        test_id='Test ID', initials='Initials', test_date='Test date', age='Age at test', sex='Sex', trial_num='Trial number', gap_ms='Gap (ms)', answer='Answer', correct='Correct answer', is_correct='Correct', reversal='Reversal'),
+    srt_trials=dict(
+        test_id='Test ID', initials='Initials', test_date='Test date', age='Age at test', sex='Sex', trial_num='Trial number', level_db='Level (dB)', word='Word', is_correct='Correct'))
+README_FIELDS = dict(
+    exported='Export date',
+    START_GAP='Initial TOJ gap',
+    STEP='Staircase multiplier',
+    N_REVERSALS='Reversals until test ends',
+    threshold_ms='Threshold',
+    sem_ms='Standard error of the mean',
+    age='Age',
+    reversal='Reversal',
+    is_correct='Correct response',
+    blank_cells='Unavailable measure')
+
+def test_row(t):
+    return dict(
+        test_id=t.id, initials=t.initials, birthday=t.birthday, sex=t.sex, test_date=t.test_date, age=age_at(t),
+        threshold_ms=t.threshold if t.completed else None, sem_ms=test_sem(t.id) if t.completed else None,
+        completed=int(t.completed), srt_db=t.srt_db, srt_done=int(t.srt_done))
+
+def test_keys(r): return {k:r[k] for k in ('test_id','initials','test_date','age','sex')}
+
+def trial_rows(t, keys):
+    trl = get_trials(t.id)
+    revn = {n for n,_ in replay(trl)[3]}
+    return [keys | dict(trial_num=o.trial_num, gap_ms=o.gap_ms, answer=o.answer, correct=o.correct, is_correct=int(o.answer==o.correct), reversal=int(o.trial_num in revn)) for o in trl]
+
+def srt_rows(t, keys):
+    trl = srt_trials_db(where='test_id=?', where_args=[t.id], order_by='trial_num')
+    return [keys | dict(trial_num=o.trial_num, level_db=o.level_db, word=o.word, is_correct=int(o.correct)) for o in trl]
+
+def readme_rows():
+    return [dict(field=README_FIELDS['exported'], description=str(date.today())),
+            dict(field=README_FIELDS['START_GAP'], description=f'{START_GAP} ms'),
+            dict(field=README_FIELDS['STEP'], description=STEP),
+            dict(field=README_FIELDS['N_REVERSALS'], description=N_REVERSALS),
+            dict(field=README_FIELDS['threshold_ms'], description='Mean gap of the last 4 reversals'),
+            dict(field=README_FIELDS['sem_ms'], description='SEM of the last 4 reversal gaps'),
+            dict(field=README_FIELDS['age'], description='Years from birthday to test date'),
+            dict(field=README_FIELDS['reversal'], description='1 if the trial ended a staircase run'),
+            dict(field=README_FIELDS['is_correct'], description='1 if the response matched the stimulus'),
+            dict(field=README_FIELDS['blank_cells'], description='Measure not yet available')]
+
+def set_widths(ws, widths):
+    for col in ws.iter_cols():
+        name = col[0].value
+        ws.column_dimensions[col[0].column_letter].width = widths.get(name, DEFAULT_WIDTH)
+
+def style_sheet(ws, row_header=False):
+    for cell in ws[1]:
+        cell.fill = COBALT
+        cell.font = HEADER_FONT
+    for row in ws.iter_rows(min_row=2):
+        for cell in row: cell.fill = OFF_WHITE
+    if row_header:
+        for row in ws.iter_rows(min_row=2, max_col=1):
+            row[0].fill = COBALT
+            row[0].font = HEADER_FONT
+
+def export_book():
+    tsts = list(tests_db())
+    rows = [test_row(t) for t in tsts]
+    trls = [r for t,r in zip(tsts, rows) for r in trial_rows(t, test_keys(r))]
+    srts = [r for t,r in zip(tsts, rows) for r in srt_rows(t, test_keys(r))]
+    sheets = dict(tests=rows, trials=trls, srt_trials=srts)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as xl:
+        pd.DataFrame(readme_rows()).to_excel(xl, sheet_name='README', index=False)
+        ws = xl.sheets['README']
+        style_sheet(ws, row_header=True)
+        set_widths(ws, COLUMN_WIDTHS['README'])
+        for name,data in sheets.items():
+            df = pd.DataFrame(data).rename(columns=DATA_HEADERS[name])
+            df.to_excel(xl, sheet_name=name, index=False)
+            ws = xl.sheets[name]
+            style_sheet(ws)
+            set_widths(ws, COLUMN_WIDTHS.get(name, {}))
+            ws.freeze_panes = 'A2'
+    return buf.getvalue()
 
 def plot(x, y, xlabel='', ylabel='', title='', precision=0, cls=None, id=None, name=None, annotations=None, markers=None, **kwargs):
     chart = dict(type='line', zoom=dict(enabled=False), toolbar=dict(show=False), height=380) | kwargs
@@ -206,38 +312,6 @@ def done_card(t, n):
         P(cls=TextPresets.bold_lg)(f'Threshold: {t.threshold:.1f} ± {test_sem(t.id):.1f} ms'),
         A(href='/tests/new', cls=AT.primary)('New test'))
 
-
-def test_panel(tid):
-    t = tests_db[tid]
-    trl = get_trials(tid)
-    gap,_,_,revs = replay(trl)
-    panel = done_card(t, len(trl)) if t.completed else trial_card(tid, len(trl)+1, gap, revs, random.choice(['left','right']), toj_gain(t.srt_db))
-    chart = gap_chart(trl, revs) if t.completed else gap_chart(trl, revs, len(trl)+1, gap)
-    panel = done_card(t, len(trl)) if t.completed else trial_card(tid, len(trl)+1, gap, revs, random.choice(['left','right']), toj_gain(t.srt_db))
-    return Div(id='test-panel', cls='flex flex-col gap-4')(panel, chart)
-
-@rt('/tests/{tid}')
-def get(tid:int):
-    t = tests_db[tid]
-    hdr = (Script(src='/js/playStimulus.js'), patient_cards(t))
-    if not t.srt_done: return Container(*hdr, srt_panel(tid), cls='flex flex-col gap-4 p-8')
-    if not srt_ok(t.srt_db): return Container(*hdr, headroom_card(tid, t), cls='flex flex-col gap-4 p-8')
-    return Container(*hdr, test_panel(tid), cls='flex flex-col gap-4 p-8')
-
-@rt('/tests/{tid}/trials')
-def post(tid:int, answer:str, correct:str):
-    t = tests_db[tid]
-    if t.completed: return test_panel(tid)
-    trl = get_trials(tid)
-    gap,streak,last_dir,revs = replay(trl)
-    ngap,_,_,rev = step_state(gap, streak, last_dir, answer==correct)
-    trials_db.insert(Trial(test_id=tid, trial_num=len(trl)+1, gap_ms=gap, answer=answer, correct=correct))
-    if rev: revs.append((len(trl)+1, gap))
-    if len(revs)>=N_REVERSALS:
-        tests_db.update(dict(id=tid, threshold=sum(g for _,g in revs[-4:])/4, completed=True))
-        return test_panel(tid), patient_cards(tests_db[tid], hx_swap_oob='true')
-    return test_panel(tid)
-
 def css_arrow(dir, w='[2rem]', h='[0.5rem]'):
     side = 'l' if dir=='r' else 'r'
     return Span(cls=f'border-y-{h} border-y-transparent border-{side}-{w} border-{side}-current')
@@ -255,6 +329,15 @@ def trial_card(tid, num, gap, revs, side, lvl):
             Button(**btn_attrs, value='right', cls=ButtonT.primary+btn_cls, hx_trigger="click, keyup[key=='ArrowRight'] from:body")(
                 P(cls=TextT.xl)('Right'), css_arrow('r')),
             cls='gap-4 pt-4 w-full'))
+
+def test_panel(tid):
+    t = tests_db[tid]
+    trl = get_trials(tid)
+    gap,_,_,revs = replay(trl)
+    panel = done_card(t, len(trl)) if t.completed else trial_card(tid, len(trl)+1, gap, revs, random.choice(['left','right']), toj_gain(t.srt_db))
+    chart = gap_chart(trl, revs) if t.completed else gap_chart(trl, revs, len(trl)+1, gap)
+    panel = done_card(t, len(trl)) if t.completed else trial_card(tid, len(trl)+1, gap, revs, random.choice(['left','right']), toj_gain(t.srt_db))
+    return Div(id='test-panel', cls='flex flex-col gap-4')(panel, chart)
 
 def srt_panel(tid):
     t = tests_db[tid]
