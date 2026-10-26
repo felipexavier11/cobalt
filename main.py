@@ -263,6 +263,11 @@ def export_book():
             ws.freeze_panes = 'A2'
     return buf.getvalue()
 
+@rt('/tests/export')
+def get():
+    fn = f'cobalt_{date.today()}.xlsx'
+    return Response(export_book(), media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers={'content-disposition': f'attachment; filename="{fn}"'})
+
 def plot(x, y, xlabel='', ylabel='', title='', precision=0, cls=None, id=None, name=None, annotations=None, markers=None, **kwargs):
     chart = dict(type='line', zoom=dict(enabled=False), toolbar=dict(show=False), height=380) | kwargs
     opts = dict(
@@ -338,6 +343,29 @@ def test_panel(tid):
     chart = gap_chart(trl, revs) if t.completed else gap_chart(trl, revs, len(trl)+1, gap)
     panel = done_card(t, len(trl)) if t.completed else trial_card(tid, len(trl)+1, gap, revs, random.choice(['left','right']), toj_gain(t.srt_db))
     return Div(id='test-panel', cls='flex flex-col gap-4')(panel, chart)
+
+@rt('/tests/{tid}')
+def get(tid:int):
+    try: t = tests_db[tid]
+    except NotFoundError: return Response(status_code=404)
+    hdr = (Script(src='/js/playStimulus.js'), patient_cards(t))
+    if not t.srt_done: return Container(*hdr, srt_panel(tid), cls='flex flex-col gap-4 p-8')
+    if not srt_ok(t.srt_db): return Container(*hdr, headroom_card(tid, t), cls='flex flex-col gap-4 p-8')
+    return Container(*hdr, test_panel(tid), cls='flex flex-col gap-4 p-8')
+
+@rt('/tests/{tid}/trials')
+def post(tid:int, answer:str, correct:str):
+    t = tests_db[tid]
+    if t.completed: return test_panel(tid)
+    trl = get_trials(tid)
+    gap,streak,last_dir,revs = replay(trl)
+    ngap,_,_,rev = step_state(gap, streak, last_dir, answer==correct)
+    trials_db.insert(Trial(test_id=tid, trial_num=len(trl)+1, gap_ms=gap, answer=answer, correct=correct))
+    if rev: revs.append((len(trl)+1, gap))
+    if len(revs)>=N_REVERSALS:
+        tests_db.update(dict(id=tid, threshold=sum(g for _,g in revs[-4:])/4, completed=True))
+        return test_panel(tid), patient_cards(tests_db[tid], hx_swap_oob='true')
+    return test_panel(tid)
 
 def srt_panel(tid):
     t = tests_db[tid]
